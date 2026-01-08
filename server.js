@@ -191,7 +191,7 @@ app.post("/v1/chat/completions", async (req, res) => {
       model,
       messages,
       temperature = 0.7,
-      max_tokens = 4096,
+      max_tokens = 6000,
       top_p = 1,
       frequency_penalty = 0,
       presence_penalty = 0,
@@ -225,7 +225,7 @@ app.post("/v1/chat/completions", async (req, res) => {
       model: nimModel,
       messages: messages,
       temperature: Math.max(0, Math.min(2, temperature)),
-      max_tokens: Math.min(max_tokens, 16384),
+      max_tokens: Math.min(max_tokens, 4096),
       top_p: Math.max(0, Math.min(1, top_p)),
       stream: stream,
     };
@@ -413,5 +413,6 @@ app.listen(PORT, () => {
   console.log(`🌐 Health check: http://localhost:${PORT}/health`);
   console.log("========================================");
 });
+
 
 
