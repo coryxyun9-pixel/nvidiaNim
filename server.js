@@ -191,7 +191,7 @@ app.post("/v1/chat/completions", async (req, res) => {
       model,
       messages,
       temperature = 0.7,
-      max_tokens = 0,
+      max_tokens = 4096,
       top_p = 1,
       frequency_penalty = 0,
       presence_penalty = 0,
@@ -413,4 +413,5 @@ app.listen(PORT, () => {
   console.log(`🌐 Health check: http://localhost:${PORT}/health`);
   console.log("========================================");
 });
+
 
