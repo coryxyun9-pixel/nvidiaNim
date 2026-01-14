@@ -5,51 +5,49 @@ const axios = require("axios");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const NIM_API_BASE = process.env.NIM_API_BASE || "https://integrate.api.nvidia.com/v1";
+const NIM_API_BASE = "https://integrate.api.nvidia.com/v1";
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-// --- YOUR CONFIGURATION ---
+// --- CONFIGURATION ---
 const SHOW_REASONING = true;       
 const ENABLE_THINKING_MODE = true;  
 
-// RESTORED: Your full model mapping
 const MODEL_MAPPING = {
   "gpt-4": "meta/llama-3.3-70b-instruct",
   "gpt-4-turbo": "meta/llama-3.3-70b-instruct",
-  "gpt-4o": "deepseek-ai/deepseek-v3.2", 
-  "claude-3.5-sonnet": "deepseek-ai/deepseek-v3.2",
-  "gpt-3.5-turbo": "meta/llama-4-maverick-17b-128e-instruct",
-  "claude-3-sonnet": "meta/llama-4-maverick-17b-128e-instruct",
+  "gpt-4o": "deepseek-ai/deepseek-v3.2", // RESTORED
+  "claude-3.5-sonnet": "deepseek-ai/deepseek-v3.2", // RESTORED
+  "gpt-3.5-turbo": "meta/llama-3.3-70b-instruct",
+  "claude-3-sonnet": "meta/llama-3.3-70b-instruct",
   "o1-preview": "deepseek-ai/deepseek-r1",
   "o1-mini": "meta/llama-3.3-70b-instruct",
-  "gemini-pro": "meta/llama-4-scout-17b-16e-instruct",
-  "gpt-4o-mini": "meta/llama-4-scout-17b-16e-instruct",
+  "gemini-pro": "meta/llama-3.3-70b-instruct",
+  "gpt-4o-mini": "meta/llama-3.3-70b-instruct",
 };
 
 const FALLBACK_MODELS = {
   large: "deepseek-ai/deepseek-v3.2",
   medium: "meta/llama-3.3-70b-instruct",
-  small: "meta/llama-4-scout-17b-16e-instruct",
+  small: "meta/llama-3.1-8b-instruct",
 };
 
 app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"], allowedHeaders: ["Content-Type", "Authorization"] }));
 app.use(express.json({ limit: "50mb" }));
 
-// Helper: Smart model selection
 async function selectModel(requestedModel) {
   return MODEL_MAPPING[requestedModel] || FALLBACK_MODELS.large;
 }
 
-// Helper: Formatting logic for non-streaming
 function formatResponseContent(message, showReasoning) {
   let fullContent = message.content || "";
-  if (showReasoning && message.reasoning_content) {
-    fullContent = `<think>\n${message.reasoning_content}\n</think>\n\n${fullContent}`;
+  // Check both DeepSeek specific and generic reasoning fields
+  const reasoning = message.reasoning_content || message.reasoning;
+  if (showReasoning && reasoning) {
+    fullContent = `<think>\n${reasoning}\n</think>\n\n${fullContent}`;
   }
   return fullContent;
 }
 
-// FIX: Root route to prevent Vercel 404
 app.get("/", (req, res) => res.status(200).send("Proxy Active 🚀"));
 
 app.post("/v1/chat/completions", async (req, res) => {
@@ -59,10 +57,14 @@ app.post("/v1/chat/completions", async (req, res) => {
     const { model, messages, temperature = 0.6, max_tokens, stream = false } = req.body;
     const nimModel = await selectModel(model);
 
-    // --- THE BOTTLENECK FIXES ---
-    // 1. Give it enough "Thinking Space" (16k tokens instead of 4k)
+    // LOGGING: Check your Vercel logs to see what model is actually used
+    console.log(`[REQUEST] Using NIM Model: ${nimModel}`);
+
     const isDeepSeek = nimModel.includes("deepseek");
-    const safeMaxTokens = isDeepSeek ? 16384 : (max_tokens || 4096);
+    
+    // FORCED TOKEN WINDOW: V3.2 reasoning will FAIL if this is low.
+    // If you send 4k, the model "gives up" on complex thought.
+    const safeMaxTokens = isDeepSeek ? Math.max(max_tokens || 0, 16384) : (max_tokens || 4096);
 
     const nimRequest = {
       model: nimModel,
@@ -72,9 +74,10 @@ app.post("/v1/chat/completions", async (req, res) => {
       stream: stream,
     };
 
-    // 2. The "Intelligence" Toggle: Activates the V3.2 reasoning engine
+    // THE INTEL TOGGLE: This is what stops it from being "stupid"
     if (ENABLE_THINKING_MODE && isDeepSeek) {
       nimRequest.extra_body = {
+        // vLLM / NIM standard for 2026
         chat_template_kwargs: { thinking: true }
       };
     }
@@ -106,11 +109,11 @@ app.post("/v1/chat/completions", async (req, res) => {
       res.json(openaiResponse);
     }
   } catch (error) {
+    console.error("NIM Error Details:", error.response?.data || error.message);
     res.status(500).json({ error: error.message, details: error.response?.data });
   }
 });
 
-// Full streaming handler with reasoning support
 function handleStreaming(response, res, originalModelName) {
   res.setHeader("Content-Type", "text/event-stream");
   let reasoningStarted = false;
@@ -129,7 +132,8 @@ function handleStreaming(response, res, originalModelName) {
         if (!delta) return;
 
         let combinedContent = "";
-        const reasoning = delta.reasoning_content;
+        // NVIDIA NIM sometimes swaps between 'reasoning_content' and 'reasoning'
+        const reasoning = delta.reasoning_content || delta.reasoning;
         const content = delta.content;
 
         if (SHOW_REASONING) {
@@ -158,17 +162,15 @@ function handleStreaming(response, res, originalModelName) {
           data.model = originalModelName;
           res.write(`data: ${JSON.stringify(data)}\n\n`);
         }
-      } catch (e) { /* ignore parse errors */ }
+      } catch (e) { }
     });
   });
 
   response.data.on("end", () => res.end());
 }
 
-// VERCEL SUPPORT: Export app for root deployment
 module.exports = app;
 
-// Local fallback
 if (require.main === module) {
   app.listen(PORT, () => console.log(`🚀 Server on port ${PORT}`));
 }
