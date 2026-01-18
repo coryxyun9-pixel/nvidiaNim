@@ -15,15 +15,18 @@ const ENABLE_THINKING_MODE = true;
 // Optimized token limits for DeepSeek V3.2
 const DEEPSEEK_CONFIG = {
   // Lower max_tokens for faster responses while maintaining quality
-  optimalMaxTokens: 6144,      // Sweet spot: good quality, reasonable speed
+  optimalMaxTokens: 4096,      // Reduced for faster responses
   minMaxTokens: 2048,          // Minimum for coherent responses
-  maxMaxTokens: 12288,         // Maximum before it gets too slow
+  maxMaxTokens: 8192,          // Reduced maximum to prevent timeouts
   
   // Temperature settings
   optimalTemperature: 0.7,     // Best for creative RP
+  minTemperature: 0.3,         // Never use 0 - causes DeepSeek to overthink
   
   // Timeout settings
-  requestTimeout: 120000,      // 2 minutes (realistic for DeepSeek)
+  requestTimeout: 180000,      // 3 minutes (increased for safety)
+  retryAttempts: 1,            // Retry once on timeout
+  retryDelay: 2000,            // 2 second delay before retry
 };
 
 const MODEL_MAPPING = {
@@ -165,7 +168,17 @@ app.post("/v1/chat/completions", async (req, res) => {
     const optimalMaxTokens = calculateOptimalTokens(max_tokens, totalInputTokens, isDeepSeek);
     
     // Optimize temperature for DeepSeek
-    const optimalTemperature = temperature ?? (isDeepSeek ? DEEPSEEK_CONFIG.optimalTemperature : 0.6);
+    let optimalTemperature = temperature ?? DEEPSEEK_CONFIG.optimalTemperature;
+    
+    // CRITICAL: DeepSeek gets stuck with temperature 0
+    if (isDeepSeek && optimalTemperature < DEEPSEEK_CONFIG.minTemperature) {
+      logWarn('Temperature too low for DeepSeek, adjusting', {
+        requestId,
+        requestedTemp: optimalTemperature,
+        adjustedTemp: DEEPSEEK_CONFIG.minTemperature
+      });
+      optimalTemperature = DEEPSEEK_CONFIG.minTemperature;
+    }
 
     logInfo('Request analyzed', {
       requestId,
@@ -242,17 +255,53 @@ app.post("/v1/chat/completions", async (req, res) => {
       endpoint: NIM_API_BASE,
       model: nimModel,
       maxTokens: optimalMaxTokens,
+      temperature: optimalTemperature,
       thinkingMode: ENABLE_THINKING_MODE && isDeepSeek
     });
 
-    const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
-      headers: { 
-        Authorization: `Bearer ${NIM_API_KEY}`, 
-        "Content-Type": "application/json" 
-      },
-      responseType: stream ? "stream" : "json",
-      timeout: DEEPSEEK_CONFIG.requestTimeout,
-    });
+    // Retry logic for DeepSeek timeouts
+    let response = null;
+    let lastError = null;
+    
+    for (let attempt = 0; attempt <= DEEPSEEK_CONFIG.retryAttempts; attempt++) {
+      try {
+        if (attempt > 0) {
+          logWarn('Retrying request', { 
+            requestId, 
+            attempt, 
+            maxAttempts: DEEPSEEK_CONFIG.retryAttempts + 1,
+            delay: `${DEEPSEEK_CONFIG.retryDelay}ms`
+          });
+          await new Promise(resolve => setTimeout(resolve, DEEPSEEK_CONFIG.retryDelay));
+        }
+
+        response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
+          headers: { 
+            Authorization: `Bearer ${NIM_API_KEY}`, 
+            "Content-Type": "application/json" 
+          },
+          responseType: stream ? "stream" : "json",
+          timeout: DEEPSEEK_CONFIG.requestTimeout,
+        });
+
+        // Success - break out of retry loop
+        break;
+        
+      } catch (error) {
+        lastError = error;
+        
+        // Only retry on timeout errors
+        if (error.code !== 'ECONNABORTED' || attempt === DEEPSEEK_CONFIG.retryAttempts) {
+          throw error;
+        }
+        
+        logWarn('Request timed out, will retry', {
+          requestId,
+          attempt: attempt + 1,
+          timeout: `${DEEPSEEK_CONFIG.requestTimeout}ms`
+        });
+      }
+    }
 
     const nimResponseTime = timer.checkpoint('nim_responded');
 
