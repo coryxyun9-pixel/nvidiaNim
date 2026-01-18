@@ -8,9 +8,23 @@ const PORT = process.env.PORT || 3000;
 const NIM_API_BASE = "https://integrate.api.nvidia.com/v1";
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-// --- CONFIGURATION ---
+// === DEEPSEEK V3.2 OPTIMIZED CONFIGURATION ===
 const SHOW_REASONING = true;       
-const ENABLE_THINKING_MODE = true;  
+const ENABLE_THINKING_MODE = true;
+
+// Optimized token limits for DeepSeek V3.2
+const DEEPSEEK_CONFIG = {
+  // Lower max_tokens for faster responses while maintaining quality
+  optimalMaxTokens: 6144,      // Sweet spot: good quality, reasonable speed
+  minMaxTokens: 2048,          // Minimum for coherent responses
+  maxMaxTokens: 12288,         // Maximum before it gets too slow
+  
+  // Temperature settings
+  optimalTemperature: 0.7,     // Best for creative RP
+  
+  // Timeout settings
+  requestTimeout: 120000,      // 2 minutes (realistic for DeepSeek)
+};
 
 const MODEL_MAPPING = {
   "gpt-4": "meta/llama-3.3-70b-instruct",
@@ -77,6 +91,35 @@ async function selectModel(requestedModel) {
   return MODEL_MAPPING[requestedModel] || FALLBACK_MODELS.large;
 }
 
+// === OPTIMIZED TOKEN CALCULATION FOR DEEPSEEK ===
+function calculateOptimalTokens(requestedTokens, totalInputTokens, isDeepSeek) {
+  if (!isDeepSeek) {
+    return requestedTokens || 4096;
+  }
+
+  // DeepSeek V3.2 optimization logic
+  let optimalTokens = requestedTokens || DEEPSEEK_CONFIG.optimalMaxTokens;
+
+  // If input is very large, reduce output to prevent timeouts
+  if (totalInputTokens > 20000) {
+    optimalTokens = Math.min(optimalTokens, 4096);
+    logWarn('Large input detected, reducing max_tokens', { 
+      totalInputTokens, 
+      adjustedMaxTokens: optimalTokens 
+    });
+  } else if (totalInputTokens > 10000) {
+    optimalTokens = Math.min(optimalTokens, 6144);
+  }
+
+  // Enforce bounds
+  optimalTokens = Math.max(
+    DEEPSEEK_CONFIG.minMaxTokens,
+    Math.min(optimalTokens, DEEPSEEK_CONFIG.maxMaxTokens)
+  );
+
+  return optimalTokens;
+}
+
 function formatResponseContent(message, showReasoning) {
   let fullContent = message.content || "";
   const reasoning = message.reasoning_content || message.reasoning;
@@ -86,7 +129,7 @@ function formatResponseContent(message, showReasoning) {
   return fullContent;
 }
 
-app.get("/", (req, res) => res.status(200).send("Proxy Active 🚀"));
+app.get("/", (req, res) => res.status(200).send("Proxy Active 🚀 | DeepSeek V3.2 Optimized"));
 
 app.post("/v1/chat/completions", async (req, res) => {
   const timer = new Timer('chat_completion');
@@ -106,8 +149,9 @@ app.post("/v1/chat/completions", async (req, res) => {
 
     timer.checkpoint('body_received');
 
-    const { model, messages, temperature = 0.6, max_tokens, stream = false } = req.body;
+    const { model, messages, temperature, max_tokens, stream = false } = req.body;
     const nimModel = await selectModel(model);
+    const isDeepSeek = nimModel.includes("deepseek");
 
     // Analyze request
     const systemMessage = messages?.find(m => m.role === 'system');
@@ -115,54 +159,80 @@ app.post("/v1/chat/completions", async (req, res) => {
     const assistantMessages = messages?.filter(m => m.role === 'assistant') || [];
     
     const systemTokens = estimateTokens(systemMessage?.content);
-    const totalMessageTokens = messages?.reduce((sum, msg) => sum + estimateTokens(msg.content), 0) || 0;
+    const totalInputTokens = messages?.reduce((sum, msg) => sum + estimateTokens(msg.content), 0) || 0;
+
+    // Calculate optimal tokens for DeepSeek
+    const optimalMaxTokens = calculateOptimalTokens(max_tokens, totalInputTokens, isDeepSeek);
+    
+    // Optimize temperature for DeepSeek
+    const optimalTemperature = temperature ?? (isDeepSeek ? DEEPSEEK_CONFIG.optimalTemperature : 0.6);
 
     logInfo('Request analyzed', {
       requestId,
       requestedModel: model,
       nimModel: nimModel,
+      isDeepSeek,
       totalMessages: messages?.length || 0,
       userMessages: userMessages.length,
       assistantMessages: assistantMessages.length,
       systemPromptTokens: systemTokens,
-      totalInputTokens: totalMessageTokens,
-      maxTokens: max_tokens || 'default',
-      temperature,
-      streaming: stream
+      totalInputTokens,
+      requestedMaxTokens: max_tokens || 'none',
+      optimalMaxTokens,
+      temperature: optimalTemperature,
+      streaming: stream,
+      thinkingMode: ENABLE_THINKING_MODE && isDeepSeek
     });
 
-    // Warnings
-    if (systemTokens > 10000) {
-      logWarn('Very large system prompt detected', {
+    // Performance warnings
+    if (systemTokens > 8000) {
+      logWarn('Very large system prompt', {
         requestId,
         systemTokens,
-        warning: 'This may cause slow responses'
+        recommendation: 'Consider reducing system prompt size for faster responses'
       });
     }
 
-    if (totalMessageTokens > 30000) {
+    if (totalInputTokens > 25000) {
       logWarn('Very large total context', {
         requestId,
-        totalMessageTokens
+        totalInputTokens,
+        warning: 'Expect slower response times (30-60s)'
       });
     }
 
-    const isDeepSeek = nimModel.includes("deepseek");
-    const safeMaxTokens = isDeepSeek ? Math.max(max_tokens || 0, 16384) : (max_tokens || 4096);
+    // Estimate response time for DeepSeek
+    if (isDeepSeek) {
+      let estimatedTime = 10; // Base time
+      estimatedTime += Math.floor(totalInputTokens / 1000) * 2; // +2s per 1k input tokens
+      estimatedTime += Math.floor(optimalMaxTokens / 1000) * 3; // +3s per 1k output tokens
+      
+      if (ENABLE_THINKING_MODE) {
+        estimatedTime += 10; // Thinking mode adds ~10s
+      }
 
+      logInfo('DeepSeek performance estimate', {
+        requestId,
+        estimatedResponseTime: `${estimatedTime}s`,
+        thinkingModeEnabled: ENABLE_THINKING_MODE
+      });
+    }
+
+    // Build request
     const nimRequest = {
       model: nimModel,
       messages: messages,
-      temperature: temperature,
-      max_tokens: safeMaxTokens,
+      temperature: optimalTemperature,
+      max_tokens: optimalMaxTokens,
       stream: stream,
     };
 
+    // Enable thinking mode for DeepSeek
     if (ENABLE_THINKING_MODE && isDeepSeek) {
       nimRequest.extra_body = {
         chat_template_kwargs: { thinking: true }
       };
-      logDebug('Thinking mode enabled', { requestId });
+      logDebug('DeepSeek thinking mode enabled', { requestId });
     }
 
     timer.checkpoint('before_nim_call');
@@ -171,22 +241,29 @@ app.post("/v1/chat/completions", async (req, res) => {
       requestId,
       endpoint: NIM_API_BASE,
       model: nimModel,
-      maxTokens: safeMaxTokens
+      maxTokens: optimalMaxTokens,
+      thinkingMode: ENABLE_THINKING_MODE && isDeepSeek
     });
 
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
-      headers: { Authorization: `Bearer ${NIM_API_KEY}`, "Content-Type": "application/json" },
+      headers: { 
+        Authorization: `Bearer ${NIM_API_KEY}`, 
+        "Content-Type": "application/json" 
+      },
       responseType: stream ? "stream" : "json",
-      timeout: 300000,
+      timeout: DEEPSEEK_CONFIG.requestTimeout,
     });
 
-    timer.checkpoint('nim_responded');
+    const nimResponseTime = timer.checkpoint('nim_responded');
 
     logInfo('NIM API responded', {
       requestId,
       status: response.status,
       streaming: stream,
-      elapsed: `${Date.now() - timer.start}ms`
+      responseTime: `${nimResponseTime}ms`,
+      performanceRating: nimResponseTime < 10000 ? 'excellent' : 
+                         nimResponseTime < 20000 ? 'good' : 
+                         nimResponseTime < 40000 ? 'acceptable' : 'slow'
     });
 
     if (stream) {
@@ -209,12 +286,15 @@ app.post("/v1/chat/completions", async (req, res) => {
         usage: response.data.usage,
       };
 
+      const usage = response.data.usage;
       logInfo('Response sent', {
         requestId,
-        inputTokens: response.data.usage?.prompt_tokens || 0,
-        outputTokens: response.data.usage?.completion_tokens || 0,
-        totalTokens: response.data.usage?.total_tokens || 0,
-        finishReason: response.data.choices?.[0]?.finish_reason
+        inputTokens: usage?.prompt_tokens || 0,
+        outputTokens: usage?.completion_tokens || 0,
+        totalTokens: usage?.total_tokens || 0,
+        finishReason: response.data.choices?.[0]?.finish_reason,
+        tokensPerSecond: usage?.completion_tokens ? 
+          Math.round((usage.completion_tokens / nimResponseTime) * 1000) : 0
       });
 
       timer.end();
@@ -228,36 +308,67 @@ app.post("/v1/chat/completions", async (req, res) => {
       errorName: error.name,
       errorMessage: error.message,
       errorCode: error.code,
+      isTimeout: error.code === 'ECONNABORTED',
       nimError: error.response?.data,
       duration: `${errorDuration}ms`,
-      stack: error.stack
+      stack: error.stack?.split('\n').slice(0, 3).join('\n')
     });
+
+    // Special handling for timeouts
+    if (error.code === 'ECONNABORTED') {
+      logWarn('Request timeout - consider reducing context or max_tokens', {
+        requestId,
+        timeout: `${DEEPSEEK_CONFIG.requestTimeout}ms`
+      });
+    }
 
     res.status(500).json({ 
       error: error.message, 
       details: error.response?.data,
-      requestId 
+      requestId,
+      suggestion: error.code === 'ECONNABORTED' ? 
+        'Request timed out. Try reducing system prompt size or max_tokens.' : null
     });
   }
 });
 
 function handleStreaming(response, res, originalModelName, requestId, timer) {
   res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  
   let reasoningStarted = false;
   let chunksReceived = 0;
   let bytesReceived = 0;
+  let firstChunkTime = null;
+  let tokensGenerated = 0;
 
   response.data.on("data", (chunk) => {
+    if (!firstChunkTime) {
+      firstChunkTime = Date.now();
+      const timeToFirstToken = firstChunkTime - timer.start;
+      logInfo('First token received', {
+        requestId,
+        timeToFirstToken: `${timeToFirstToken}ms`
+      });
+    }
+
     chunksReceived++;
     bytesReceived += chunk.length;
 
-    // Log every 20 chunks
-    if (chunksReceived % 20 === 0) {
+    // Log every 30 chunks
+    if (chunksReceived % 30 === 0) {
+      const elapsed = Date.now() - timer.start;
+      const tokensPerSecond = tokensGenerated > 0 ? 
+        Math.round((tokensGenerated / elapsed) * 1000) : 0;
+      
       logDebug('Streaming progress', {
         requestId,
         chunksReceived,
         bytesReceived,
-        elapsed: `${Date.now() - timer.start}ms`
+        tokensGenerated,
+        tokensPerSecond,
+        elapsed: `${elapsed}ms`
       });
     }
 
@@ -272,6 +383,11 @@ function handleStreaming(response, res, originalModelName, requestId, timer) {
         const data = JSON.parse(line.slice(6));
         const delta = data.choices?.[0]?.delta;
         if (!delta) return;
+
+        // Count tokens (approximate)
+        if (delta.content || delta.reasoning_content || delta.reasoning) {
+          tokensGenerated++;
+        }
 
         let combinedContent = "";
         const reasoning = delta.reasoning_content || delta.reasoning;
@@ -300,22 +416,35 @@ function handleStreaming(response, res, originalModelName, requestId, timer) {
         if (combinedContent) {
           data.choices[0].delta.content = combinedContent;
           delete data.choices[0].delta.reasoning_content;
+          delete data.choices[0].delta.reasoning;
           data.model = originalModelName;
           res.write(`data: ${JSON.stringify(data)}\n\n`);
         }
       } catch (e) {
-        logError('Stream parsing error', { requestId, error: e.message });
+        logError('Stream parsing error', { 
+          requestId, 
+          error: e.message,
+          line: line.substring(0, 100)
+        });
       }
     });
   });
 
   response.data.on("end", () => {
     const streamDuration = timer.end();
-    logInfo('Stream completed', {
+    const avgTokensPerSecond = tokensGenerated > 0 ? 
+      Math.round((tokensGenerated / streamDuration) * 1000) : 0;
+    
+    logInfo('Stream completed successfully', {
       requestId,
       totalChunks: chunksReceived,
       totalBytes: bytesReceived,
-      duration: `${streamDuration}ms`
+      estimatedTokens: tokensGenerated,
+      duration: `${streamDuration}ms`,
+      avgTokensPerSecond,
+      performanceRating: avgTokensPerSecond > 30 ? 'excellent' :
+                         avgTokensPerSecond > 15 ? 'good' :
+                         avgTokensPerSecond > 5 ? 'acceptable' : 'slow'
     });
     res.end();
   });
@@ -324,14 +453,25 @@ function handleStreaming(response, res, originalModelName, requestId, timer) {
     logError('Stream error', {
       requestId,
       error: err.message,
-      chunksBeforeError: chunksReceived
+      chunksBeforeError: chunksReceived,
+      bytesBeforeError: bytesReceived
     });
-    res.end();
+    if (!res.headersSent) {
+      res.status(500).end();
+    } else {
+      res.end();
+    }
   });
 }
 
 module.exports = app;
 
 if (require.main === module) {
-  app.listen(PORT, () => console.log(`🚀 Server on port ${PORT}`));
+  app.listen(PORT, () => {
+    console.log(`🚀 Server on port ${PORT}`);
+    console.log(`📊 DeepSeek V3.2 Optimizations:`);
+    console.log(`   - Optimal max_tokens: ${DEEPSEEK_CONFIG.optimalMaxTokens}`);
+    console.log(`   - Request timeout: ${DEEPSEEK_CONFIG.requestTimeout}ms`);
+    console.log(`   - Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
+  });
 }
