@@ -172,25 +172,7 @@ function handleStreaming(response, res, originalModelName) {
 
 }
 
-// Fetch with timeout wrapper
-const fetchWithTimeout = async (url, options, timeoutMs = 9000) => {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => {
-    logWarn('Fetch timeout triggered', {
-      url,
-      timeout: `${timeoutMs}ms`
-    });
-    controller.abort();
-  }, timeoutMs);
 
-  try {
-    const fetchStart = Date.now();
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
-    const fetchDuration = Date.now() - fetchStart;
-    
     clearTimeout(timeoutId);
     
     logInfo('Fetch completed', {
@@ -484,4 +466,5 @@ module.exports = app;
 if (require.main === module) {
   app.listen(PORT, () => console.log(`🚀 Server on port ${PORT}`));
 }
+
 
