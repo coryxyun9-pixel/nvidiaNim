@@ -18,17 +18,18 @@ const DEEPSEEK_CONFIG = {
     optimalTemperature: 0.7,
     minTemperature: 0.3,
     requestTimeout: 180000, 
-    retryAttempts: 1,
+    retryAttempts: 0,
     retryDelay: 2000,
     // FIXED: DeepSeek specific stop sequences to stop the "looping/rambling"
     stop: ["<｜end of sentence｜>", "<|endoftext|>", "\nUser:", "\nAssistant:", "###"]
 };
 
 const MODEL_MAPPING = {
-    "gpt-4": "meta/llama-3.3-70b-instruct",
+    "gpt-3": "meta/llama-3.3-70b-instruct",
     "gpt-4o": "deepseek-ai/deepseek-v3.2",
     "claude-3.5-sonnet": "deepseek-ai/deepseek-v3.2",
     "o1-preview": "deepseek-ai/deepseek-r1",
+    "gpt-4": "meta/llama-3.1-405b-instruct",
 };
 
 // === RESTORED UTILITIES ===
@@ -205,3 +206,4 @@ function handleStreaming(response, res, originalModel, requestId, timer) {
 }
 
 module.exports = app;
+
